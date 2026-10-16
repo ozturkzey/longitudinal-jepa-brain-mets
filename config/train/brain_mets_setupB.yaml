@@ -1,0 +1,81 @@
+# Setup B: 768-d frozen pretrained encoder ->
+# MLP/projector -> 192-d -> predictor. Compare against Setup A (from-scratch
+# twin encoder) and against the current epoch-70 model, all at 192-d.
+#
+# What trains here: projector, predictor, action_encoder, pred_proj.
+# What does not: the encoder (frozen inside TimmViTEncoder, permanently eval).
+#
+# Note there is NO freeze_encoder_ckpt: that helper loads from one of OUR
+# checkpoints, and epoch-70's weights are a ViT-tiny that has nothing to do
+# with this backbone. Setting it here would fail loudly on a shape mismatch,
+# which is the correct behaviour.
+defaults:
+  - _self_
+  - launcher: local
+  - data: brain_mets_volwin     # volume_window k=5 only. The min-max A/B was dropped
+                                # 2026-08-28: the normalization fix is already justified
+                                # by direct measurement (uniform share 37.6% -> 8.0%,
+                                # corr(structure) 0.978), so the trained-model A/B was
+                                # confirmatory. data=brain_mets still switches it back.
+  - model: lewm_pretrained
+
+output_model_name: lewm_brain_mets_setupB_radiodino
+subdir: ${hydra:job.id}
+ckpt_id: null
+
+num_workers: 6
+train_split: 0.9
+seed: 3072
+img_size: 224
+encoder_dim: 768   # RadioDINO-b16's width -- the projector's INPUT
+embed_dim: 192     # the shared bottleneck every arm is compared at
+history_size: 1    # t0 context only (strict t0 -> t1 pair)
+
+trainer:
+  max_epochs: 100
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+
+# max_epochs also sets the cosine LR anneal length, so it is sized ~1.5-2x the
+# expected stopping point rather than as a pure ceiling -- an inflated value
+# leaves the LR barely annealed.
+early_stopping:
+  enabled: true
+  monitor: validate/pred_loss_epoch
+  mode: min
+  patience: 20
+
+loader:
+  batch_size: 128
+  num_workers: ${num_workers}
+  persistent_workers: True
+  prefetch_factor: 3
+  pin_memory: True
+
+optimizer:
+  type: AdamW
+  lr: 5e-5
+  weight_decay: 1e-3
+
+num_preds: 1  # predict t1
+
+loss:
+  sigreg:
+    weight: 0.09
+    kwargs:
+      knots: 17
+      num_proj: 1024
+  # NOTE (corrected 2026-08-28): a frozen encoder does NOT close the
+  # blandification channel. The target is emb_t1 = projector(CLS_t1) and the
+  # projector is TRAINABLE and SHARED across both branches, so pred_loss still
+  # has a gradient path into its own target -- it can be reduced by making t1's
+  # embedding easier to hit rather than by predicting better. Fewer parameters
+  # can exploit it than in Setup A, but the channel is open.
+  #
+  # Left false to match Setup A, so the two arms differ only in the encoder.
+  # SIGReg (weight 0.09 above) is the guard. If sigreg_loss and the embedding
+  # variance fall together in the first epochs, that is the failure mode --
+  # set detach_target=true and rerun BOTH arms, not just this one.
+  detach_target: false

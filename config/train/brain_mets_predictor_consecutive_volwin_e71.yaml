@@ -1,0 +1,10 @@
+# Reads every later visit of each patient on the frozen encoder of job 4194822
+# (epoch 70). Used as --config of fixed_anchor_eval.py for Section 4.5.
+defaults:
+  - brain_mets_predictor_residual
+  - override data: brain_mets_consecutive
+  - _self_
+
+output_model_name: lewm_brain_mets_predictor_consecutive_volwin_e71
+num_workers: 2
+freeze_encoder_ckpt: ${oc.env:STABLEWM_HOME}/checkpoints/lewm_brain_mets_encoder_volwin/weights_epoch_71.pt

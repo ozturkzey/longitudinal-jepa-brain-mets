@@ -1,0 +1,31 @@
+# Same t0/t1 pair dataset as data/brain_mets.yaml, with fully-blank slices
+# dropped (drop_blank_slices: true).
+#
+# Separate config rather than a flag on the original because the two are NOT
+# interchangeable for evaluation: numbers measured on one cannot be compared to
+# numbers measured on the other. Anything trained before 2026-08-26 (job 3096280,
+# the decoder job 3137409, the Stage-2 run 3172332) used the unfiltered version.
+#
+# Why filter (measured 2026-08-26, 113 held-out patients, 16.75% of pairs):
+#   - 12.4% have BOTH frames blank -> encode(t0) == encode(t1), so the copy-t0
+#     baseline scores an exact 0 and is unbeatable.
+#   - 4.3% have ONE frame blank -> the two volumes cover a different axial
+#     extent (acquisition/registration artifact, not biology). The baseline is
+#     catastrophically wrong there, so nearly anything beats it.
+#
+# The second group is why this matters for measurement and not just efficiency.
+# train.py's ratio is a ratio of SQUARED errors, so those few huge-error pairs
+# dominated the batch average and pushed the logged metric to 0.98 -- "beating
+# the baseline" -- while an independent per-group score showed the model losing
+# at 1.0137 [1.0046, 1.0234] on the 83% of pairs that are real brain.
+# Early stopping was selecting checkpoints on that contaminated signal.
+dataset:
+  _target_: brain_mets.brain_mets_pair_dataset.BrainMetsPairDataset
+  root_dir: ${oc.env:BRAINJEPA_REGISTERED}
+  clinical_excel: ${hydra:runtime.cwd}/Yale-Brain-Mets-Longitudinal_ClinicalData_20250605.xlsx
+  img_size: ${img_size}
+  cache_path: ${hydra:runtime.cwd}/cache/brain_mets_slice_cache.pt
+  drop_blank_slices: true
+  keys_to_load:
+    - pixels
+    - action

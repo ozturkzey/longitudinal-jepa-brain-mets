@@ -1,0 +1,82 @@
+# Decoder for the retrained radiodino arm (brain_mets_setupB_radiodino_matched), with the
+# same decoder settings as the JEPA arm's brain_mets_decoder_e70_matched.yaml
+# (decoder_dim 768, 12 heads, 250 epochs, patience 30, checkpoint every 5,
+# empty-slice pairs dropped), so Table 4.3 compares encoders and nothing else.
+# The old decoder_radiodino.yaml used the 256-wide decoder and kept empty-slice pairs.
+#
+# _self_ LAST so drop_blank_slices: true is not overridden by data/brain_mets_volwin
+# (see brain_mets_decoder_e70_matched.yaml).
+#
+# freeze_encoder_ckpt: the lowest validate/pred_loss_epoch of job 4184936 (log epoch 17, 0.1767,
+# saved as weights_epoch_18.pt; early stopping ended the run after log epoch 37).
+defaults:
+  - launcher: local
+  - data: brain_mets_volwin
+  - model: lewm_pretrained_residual
+  - _self_
+
+model:
+  clone_target_encoder: false
+  decoder:
+    decoder_kwargs:
+      decoder_dim: 768
+      num_heads: 12
+
+output_model_name: lewm_brain_mets_decoder_radiodino_matched
+subdir: ${hydra:job.id}
+ckpt_id: null
+
+freeze_encoder_ckpt: ${oc.env:STABLEWM_HOME}/checkpoints/lewm_brain_mets_setupB_radiodino_matched/weights_epoch_18.pt
+freeze_parts: [projector, predictor, pred_proj, action_encoder]
+
+data:
+  dataset:
+    drop_blank_slices: true
+
+ckpt_every: 5
+num_workers: 6
+train_split: 0.9
+seed: 3072
+img_size: 224
+encoder_dim: 768
+embed_dim: 192
+history_size: 1
+
+trainer:
+  max_epochs: 250
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+
+early_stopping:
+  enabled: true
+  monitor: validate/recon_loss_epoch
+  mode: min
+  patience: 30
+  min_delta: 1.0e-4
+
+loader:
+  batch_size: 128
+  num_workers: ${num_workers}
+  persistent_workers: True
+  prefetch_factor: 3
+  pin_memory: True
+
+optimizer:
+  type: AdamW
+  lr: 5e-5
+  weight_decay: 1e-3
+
+num_preds: 1
+
+loss:
+  sigreg:
+    weight: 0.0
+    kwargs:
+      knots: 17
+      num_proj: 1024
+  pred:
+    weight: 0.0
+  recon:
+    weight: 1.0

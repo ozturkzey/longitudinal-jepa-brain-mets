@@ -1,0 +1,64 @@
+# Pretrained-encoder arm (mricore), retrained 2026-09-17 so it matches the JEPA arm
+# in everything except the encoder, for report Table 4.3:
+#   - 2-d covariate [dt, age]. The 2026-08-28 setupB checkpoints were trained with
+#     the retired 3-d action and no longer load.
+#   - first_two pairing with empty-slice pairs dropped (data/brain_mets_volwin_clean),
+#     the data the JEPA predictor (brain_mets_predictor_residual_volwin) trained on.
+#     The old setupB runs kept blank pairs (data/brain_mets_volwin).
+#   - residual predictor, as in the JEPA arm.
+# Unchanged from brain_mets_setupB*.yaml: the projector (768 -> 192) trains here,
+# so SIGReg stays on (weight 0.09) and the target is not detached, and early
+# stopping watches the raw pred_loss -- the ratio can be lowered by a projector
+# that inflates the copy-t0 baseline.
+defaults:
+  - _self_
+  - launcher: local
+  - data: brain_mets_volwin_clean
+  - model: lewm_mricore_residual
+
+output_model_name: lewm_brain_mets_setupB_mricore_matched
+subdir: ${hydra:job.id}
+ckpt_id: null
+
+num_workers: 6
+train_split: 0.9
+seed: 3072
+img_size: 224
+encoder_dim: 768
+embed_dim: 192
+history_size: 1
+
+trainer:
+  max_epochs: 100
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+
+early_stopping:
+  enabled: true
+  monitor: validate/pred_loss_epoch
+  mode: min
+  patience: 20
+
+loader:
+  batch_size: 128
+  num_workers: ${num_workers}
+  persistent_workers: True
+  prefetch_factor: 3
+  pin_memory: True
+
+optimizer:
+  type: AdamW
+  lr: 5e-5
+  weight_decay: 1e-3
+
+num_preds: 1
+
+loss:
+  sigreg:
+    weight: 0.09
+    kwargs:
+      knots: 17
+      num_proj: 1024
+  detach_target: false

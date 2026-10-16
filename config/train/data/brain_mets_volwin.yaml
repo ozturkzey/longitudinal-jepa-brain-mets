@@ -1,0 +1,19 @@
+# Same pair dataset as data/brain_mets.yaml, reading the volume_window (k=5)
+# slice cache instead of the per-slice min-max one.
+#
+# Deliberately a SEPARATE cache file, not a flag on the same one: the cache
+# stores PROCESSED pixels, so which normalization built it cannot be recovered
+# by looking at them. BrainMetsPairDataset stamps the mapping into the file and
+# refuses a mismatch, but two files is the first line of defence and it keeps
+# the min-max cache intact as the A/B control and as rollback.
+dataset:
+  _target_: brain_mets.brain_mets_pair_dataset.BrainMetsPairDataset
+  root_dir: ${oc.env:BRAINJEPA_REGISTERED}
+  clinical_excel: ${hydra:runtime.cwd}/Yale-Brain-Mets-Longitudinal_ClinicalData_20250605.xlsx
+  img_size: ${img_size}
+  cache_path: ${hydra:runtime.cwd}/cache/brain_mets_slice_cache_volwin.pt
+  normalization: volume_window
+  drop_blank_slices: false
+  keys_to_load:
+    - pixels
+    - action

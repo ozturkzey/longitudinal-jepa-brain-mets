@@ -1,0 +1,60 @@
+# Stage 1 (encoder + projector + predictor trained together) RETRAINED on the
+# volume_window data, 2026-09-17.
+#
+# The encoder every later stage froze (job 3096280, epoch 70) was trained on the
+# per-slice MIN-MAX cache, which was replaced on 2026-08-27. Its embedding shifts by
+# 0.75x the visit-to-visit signal when fed volume_window pixels, and it was never retrained. This run removes that mismatch.
+#
+# Identical to job 3096280 (outputs/2026-08-20/17-34-38/.hydra/config.yaml) --
+# model, optimizer, seed, split, SIGReg weight, first_two pairing, 300 epochs with no
+# early stopping and a checkpoint every epoch -- so the best checkpoint is chosen
+# afterward on the held-out split exactly as epoch 70 was. Differences:
+#   - the data: volume_window cache instead of min-max (the point of this run)
+#   - empty-slice pairs dropped (data/brain_mets_volwin_clean), as every later stage
+#     does and report Section 3.1.3 states; 3096280 had kept them
+#   - unavoidable: 2-d covariate [dt, age]; 3096280 still had sex as a third entry,
+#     removed from the code on 2026-08-27 (corrupt labels)
+defaults:
+  - _self_
+  - launcher: local
+  - data: brain_mets_volwin_clean
+  - model: lewm
+
+output_model_name: lewm_brain_mets_encoder_volwin
+subdir: ${hydra:job.id}
+ckpt_id: null
+
+num_workers: 6
+train_split: 0.9
+seed: 3072
+img_size: 224
+embed_dim: 192
+history_size: 1
+
+trainer:
+  max_epochs: 300
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+
+loader:
+  batch_size: 128
+  num_workers: ${num_workers}
+  persistent_workers: True
+  prefetch_factor: 3
+  pin_memory: True
+
+optimizer:
+  type: AdamW
+  lr: 5e-5
+  weight_decay: 1e-3
+
+num_preds: 1
+
+loss:
+  sigreg:
+    weight: 0.09
+    kwargs:
+      knots: 17
+      num_proj: 1024

@@ -1,0 +1,118 @@
+# Decoder stage on the 192-d projected embedding -- the control arm for
+# brain_mets_decoder_radiodino768.yaml.
+#
+#   t0/t1 image -> FROZEN radiodino encoder -> FROZEN projector -> 192-d emb
+#                                                                  |
+#                                                    broadcast to the patch grid
+#                                                                  v
+#                                                          TRAINABLE decoder -> pixels
+#
+# This is brain_mets_decoder_radiodino.yaml (job 3271656, val L1 0.1108) with
+# three changes, all of them needed for the 768-vs-192 comparison to mean
+# anything. It is a re-run rather than a reuse of that number, because a
+# decoder trained under different settings is not a control.
+#
+#   1. decoder_dim 256 -> 768, matching the 768 arm exactly. For THIS arm the
+#      old 256 cost nothing (proj_in 192->256 is a widening), but the two arms
+#      must share one decoder or the comparison confounds embedding width with
+#      decoder capacity.
+#   2. drop_blank_slices, so the reported number is about brain, not about the
+#      16% of frames that are empty volume edges.
+#   3. max_epochs 100 -> 250 with a real early-stopping min_delta.
+#
+# The projector is frozen because `emb = projector(CLS)` IS the space being
+# inverted; a trainable one would move it every step. Only the projector and
+# the (inert) prediction path come from the checkpoint -- the encoder's weights
+# come from timm and are frozen inside TimmViTEncoder.
+#
+# _self_ goes LAST -- see the note in brain_mets_decoder_radiodino768.yaml.
+defaults:
+  - launcher: local
+  - data: brain_mets_volwin
+  - model: lewm_pretrained
+  - _self_
+
+model:
+  clone_target_encoder: false
+  decoder:
+    # Identical to the 768 arm's block, deliberately. See the long note there
+    # for why 256 is not a neutral default.
+    decoder_kwargs:
+      decoder_dim: 768
+      num_heads: 12
+
+output_model_name: lewm_brain_mets_decoder_radiodino192
+subdir: ${hydra:job.id}
+ckpt_id: null
+
+# Epoch 21 = that arm's best pred_loss_vs_baseline. Early stopping runs past
+# the optimum, so the LAST checkpoint is not the right one.
+freeze_encoder_ckpt: ${oc.env:STABLEWM_HOME}/checkpoints/lewm_brain_mets_setupB_radiodino/weights_epoch_21.pt
+# Predictor/pred_proj/action_encoder are FROZEN, not omitted: train.py's
+# lejepa_forward computes pred_loss unconditionally, so an unlisted predictor
+# would still receive gradient. Frozen, it is inert and its logged pred_loss is
+# a constant -- here a real one, unlike the 768 arm's random-init predictor.
+freeze_parts: [projector, predictor, pred_proj, action_encoder]
+
+data:
+  dataset:
+    # Same rationale as the 768 arm -- both arms must see the same frames.
+    drop_blank_slices: true
+
+# Save every 5th epoch, not every epoch. A checkpoint holds the whole JEPA --
+# the frozen 86M encoder included -- so it is ~720 MB here regardless of the
+# decoder being 30M. At every epoch, 250 epochs x 2 arms is ~360 GB of shared
+# hpcwork for two decoders; at every 5th it is ~62 GB.
+#
+# This costs nothing on selection because the quantity being selected on moves
+# slowly: job 3271656's val recon sat within 1e-4 of its optimum for its last
+# fifth. If a future run's curve is noisy near the optimum, lower this.
+ckpt_every: 5
+
+num_workers: 6
+train_split: 0.9
+seed: 3072
+img_size: 224
+encoder_dim: 768
+embed_dim: 192
+history_size: 1
+
+trainer:
+  max_epochs: 250
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+
+# min_delta: see brain_mets_decoder_radiodino768.yaml. Job 3271656 plateaued at
+# 0.1108 for its last fifth and early stopping never fired, because the default
+# min_delta of 0.0 treats a 1e-7 improvement as progress.
+early_stopping:
+  enabled: true
+  monitor: validate/recon_loss_epoch
+  mode: min
+  patience: 30
+  min_delta: 1.0e-4
+
+loader:
+  batch_size: 128
+  num_workers: ${num_workers}
+  persistent_workers: True
+  prefetch_factor: 3
+  pin_memory: True
+
+optimizer:
+  type: AdamW
+  lr: 5e-5
+  weight_decay: 1e-3
+
+num_preds: 1
+
+loss:
+  sigreg:
+    weight: 0.0
+    kwargs:
+      knots: 17
+      num_proj: 1024
+  recon:
+    weight: 1.0

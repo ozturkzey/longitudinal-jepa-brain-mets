@@ -1,0 +1,51 @@
+# EVERY consecutive visit transition (t0->t1, t1->t2, t2->t3, ...), not just
+# each patient's first two.
+#
+# WHY, and it is not "more data". `pairing: first_two` gives every patient
+# exactly ONE Δt, which confounds Δt with patient identity -- the model cannot
+# separate "a longer gap means more change" from "this patient changes a lot".
+# Consecutive pairing supplies several Δt values per patient against their own
+# anatomy, which is the only arrangement in which the Δt -> change relationship
+# is identifiable. The recorded non-significant Δt sweep (r = 0.67, p = 0.10) is what that confound looks like from the outside.
+#
+# The extra data is real but secondary: only 210 of 1,123 patients (19%) have
+# exactly two FLAIR visits, so first_two discards later visits for the other
+# 81%. Measured 2026-09-02 over the registered tree:
+#     1,123 patients >= 2 FLAIR visits, 8,724 volumes, 7,601 volume-transitions
+#     -> ~241,700 slice-level pairs against 36,138 today (~6.7x)
+#
+# SAFE BECAUSE the registration frame is shared. register_per_modality.py warps
+# every later visit onto the EARLIEST visit's grid (not pairwise onto its
+# predecessor), so all of a patient's volumes live in one space and slice index
+# i is the same anatomy at every visit. Audited 2026-09-02: 0 of 1,123 patients
+# have any shape mismatch across their FLAIR visits.
+dataset:
+  _target_: brain_mets.brain_mets_pair_dataset.BrainMetsPairDataset
+  root_dir: ${oc.env:BRAINJEPA_REGISTERED}
+  clinical_excel: ${hydra:runtime.cwd}/Yale-Brain-Mets-Longitudinal_ClinicalData_20250605.xlsx
+  img_size: ${img_size}
+  pairing: consecutive
+
+  # The ALL-VISITS cache, not the pair cache. cache/brain_mets_slice_cache_volwin.pt
+  # holds only each patient's first two visits (72,276 slices), so consecutive
+  # pairing would try to build every later visit from scratch -- over an hour.
+  # This one already covers all 8,724 volumes (277,788 slices, job 3361380), was
+  # built with the same volume_window k=5 mapping, and is keyed identically, so
+  # the two caches are interchangeable wherever both have the key.
+  #
+  # It is 41.9 GB. See num_workers in the training config -- 6 workers against
+  # this file is what took job 3180372 to 93 GB.
+  cache_path: ${hydra:runtime.cwd}/cache/brain_mets_slice_cache_volwin_all.pt
+  normalization: volume_window
+
+  # Blank frames are BRIDGED here, not dropped with both their pairs: the frame
+  # leaves the timeline and the visits either side are re-paired across it, with
+  # Δt summed over the span. A blank frame only means that visit's volume did not
+  # cover this slice index -- the neighbours are still valid observations of the
+  # same anatomy. Matches BrainMetsSequenceDataset._drop_blank_frames, so the
+  # pair and sequence populations stay comparable.
+  drop_blank_slices: true
+
+  keys_to_load:
+    - pixels
+    - action

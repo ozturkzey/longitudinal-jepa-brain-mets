@@ -1,0 +1,57 @@
+_target_: lewm_core.jepa.JEPA
+
+encoder:
+  _target_: stable_pretraining.backbone.utils.vit_hf
+  size: tiny
+  patch_size: 14
+  image_size: ${img_size}
+  pretrained: false
+  use_mask_token: false
+
+predictor:
+  _target_: lewm_core.module.ARPredictor
+  num_frames: ${history_size}
+  input_dim: ${embed_dim}
+  hidden_dim: ${embed_dim}
+  output_dim: ${embed_dim}
+  depth: 6
+  heads: 16
+  mlp_dim: 2048
+  dim_head: 64
+  dropout: 0.1
+  emb_dropout: 0.0
+
+action_encoder:
+  _target_: lewm_core.module.Embedder
+  input_dim: ???
+  emb_dim: ${embed_dim}
+
+projector:
+  _target_: lewm_core.module.MLP
+  input_dim: ${embed_dim}
+  output_dim: ${embed_dim}
+  hidden_dim: 2048
+  norm_fn:
+    _target_: torch.nn.BatchNorm1d
+    _partial_: true
+
+pred_proj:
+  _target_: lewm_core.module.MLP
+  input_dim: ${embed_dim}
+  output_dim: ${embed_dim}
+  hidden_dim: 2048
+  norm_fn:
+    _target_: torch.nn.BatchNorm1d
+    _partial_: true
+
+# Decodes the encoder's raw per-patch tokens back to pixels (see
+# lewm_core.jepa.JEPA.decode). Harmless to instantiate for runs that don't
+# use it (e.g. pusht) -- it's never called unless loss.recon is configured,
+# see train.py's lejepa_forward. embed_dim/patch_size match this file's own
+# encoder block above, not a separate value.
+decoder:
+  _target_: stable_pretraining.backbone.decoders.build_image_decoder
+  embed_dim: ${embed_dim}
+  image_shape: [3, "${img_size}", "${img_size}"]
+  kind: vit
+  patch_size: 14

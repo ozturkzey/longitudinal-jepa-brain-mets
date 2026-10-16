@@ -1,0 +1,7 @@
+# model/lewm_mricore.yaml with residual_predict: true, matching the JEPA arm's
+# residual predictor (model/lewm_residual.yaml).
+defaults:
+  - lewm_mricore
+  - _self_
+
+residual_predict: true

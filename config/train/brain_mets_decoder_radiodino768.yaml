@@ -1,0 +1,159 @@
+# Decoder stage on RadioDINO's RAW 768-d embedding -- no projector.
+#
+#   t0/t1 image -> FROZEN radiodino encoder -> CLS token, 768-d
+#                                                |
+#                                  broadcast to the 196-patch grid
+#                                                v
+#                                        TRAINABLE decoder -> pixels
+#
+# The instruction: "the decoding has to be from the
+# embedding ALONE... get an upper bound for the informational content in the
+# embedding space. Try training a decoder with the radiodino encoder, but
+# without the projector, so from 768 dim embedding". This arm is the 768-d
+# half; brain_mets_decoder_radiodino192.yaml is its 192-d twin, identical in
+# every other respect, so the pair isolates the width of the pooled vector.
+#
+# NOTHING is loaded from any of our checkpoints here. RadioDINO freezes itself
+# inside TimmViTEncoder, and with the projector gone there is no trained piece
+# left in the decode path -- so this measures a property of a public encoder,
+# not of one of our training runs.
+#
+# _self_ goes LAST: Hydra applies the defaults list in order, so with _self_
+# first the `model:` block below would be overwritten by model/lewm_pretrained
+# instead of overriding it.
+defaults:
+  - launcher: local
+  - data: brain_mets_volwin
+  - model: lewm_pretrained
+  - _self_
+
+model:
+  # No prediction happens in this stage, so a target-encoder clone would be a
+  # second frozen copy of an identical function -- 86M params of GPU memory for
+  # nothing. encode() falls back to the single-encoder path.
+  clone_target_encoder: false
+
+  # THE POINT OF THIS ARM. JEPA.__init__ does `self.projector = projector or
+  # nn.Identity()`, so null makes `emb` the raw CLS token at 768-d instead of
+  # projector(CLS) at 192-d.
+  projector: null
+
+  decoder:
+    # ViTImageDecoder's first layer is `proj_in = Linear(embed_dim, decoder_dim)`
+    # and decoder_dim DEFAULTS TO 256 -- upstream stable_pretraining's choice
+    # ("MAE default 512; we use 256 to stay light for online use"), never one of
+    # ours. Every patch position receives the same broadcast vector, so proj_in
+    # is the only gate the embedding passes through: left at 256 it is a rank-256
+    # map and this arm would measure 256 dimensions while being reported as 768.
+    # It fails silently -- the run completes and the number looks plausible.
+    # 768 makes proj_in full-rank 768->768, narrowing nothing.
+    #
+    # The 192 arm carries this same block, so both arms get a byte-identical
+    # decoder and the ONLY difference between them is embed_dim.
+    decoder_kwargs:
+      decoder_dim: 768
+      num_heads: 12
+
+output_model_name: lewm_brain_mets_decoder_radiodino768
+subdir: ${hydra:job.id}
+ckpt_id: null
+
+# No checkpoint. `freeze_untrained_parts` freezes at fresh init instead --
+# lewm_core/utils.py:319. The encoder is not listed because TimmViTEncoder
+# freezes and eval-pins itself; the projector is not listed because it is now
+# nn.Identity and has no parameters.
+#
+# The predictor/pred_proj/action_encoder ARE listed rather than omitted:
+# train.py's lejepa_forward calls model.predict() and computes pred_loss
+# unconditionally, so a merely-unlisted predictor would receive gradient and
+# train during this stage. Frozen at random init they are inert.
+#
+# CONSEQUENCE, and it must not be misread: this arm's logged pred_loss,
+# baseline_loss and pred_loss_vs_baseline come from a RANDOM predictor and are
+# meaningless noise constants. They carry no gradient, so they cost nothing but
+# compute -- but they must never be reported. Only recon_loss means anything.
+freeze_encoder_ckpt: null
+freeze_untrained_parts: [predictor, pred_proj, action_encoder]
+
+data:
+  dataset:
+    # ~16% of slices are blank volume edges (measured 2026-08-31:
+    # diagnose_decoder_data_limit.py, 84.0% non-blank). Any embedding
+    # reconstructs a black rectangle perfectly, so keeping them pulls the
+    # headline L1 from 0.1282 down to 0.1079 -- a fifth of the reported quality
+    # would be the decoder drawing empty space. This measurement is about how
+    # much BRAIN the embedding carries, so they go.
+    drop_blank_slices: true
+
+# Save every 5th epoch, not every epoch. A checkpoint holds the whole JEPA --
+# the frozen 86M encoder included -- so it is ~720 MB here regardless of the
+# decoder being 30M. At every epoch, 250 epochs x 2 arms is ~360 GB of shared
+# hpcwork for two decoders; at every 5th it is ~62 GB.
+#
+# This costs nothing on selection because the quantity being selected on moves
+# slowly: job 3271656's val recon sat within 1e-4 of its optimum for its last
+# fifth. If a future run's curve is noisy near the optimum, lower this.
+ckpt_every: 5
+
+num_workers: 6
+train_split: 0.9
+seed: 3072
+img_size: 224
+encoder_dim: 768
+
+# LOAD-BEARING, and not just the decoder's input width.
+# model/lewm_pretrained.yaml wires predictor, pred_proj, action_encoder AND
+# decoder.embed_dim all off ${embed_dim}. With the projector gone `emb` is
+# 768-d, so all of them must be 768-d too or JEPA.predict fails on a shape
+# mismatch. This is why it is 768 and not 192.
+embed_dim: 768
+history_size: 1
+
+trainer:
+  max_epochs: 250
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+
+# recon_loss is the only term with a gradient, so monitor it directly.
+#
+# min_delta is NOT decoration. It defaults to 0.0, which counts a 1e-7
+# improvement as progress and resets patience -- job 3271656 sat at 0.1108 for
+# the last fifth of its run and early stopping never fired. Without this the
+# callback cannot end a converged run.
+early_stopping:
+  enabled: true
+  monitor: validate/recon_loss_epoch
+  mode: min
+  patience: 30
+  min_delta: 1.0e-4
+
+loader:
+  batch_size: 128
+  num_workers: ${num_workers}
+  persistent_workers: True
+  prefetch_factor: 3
+  pin_memory: True
+
+optimizer:
+  type: AdamW
+  lr: 5e-5
+  weight_decay: 1e-3
+
+num_preds: 1
+
+loss:
+  # Zero: emb is fully frozen here, so sigreg has no gradient and computing a
+  # 1024-projection statistic every step would be wasted work.
+  sigreg:
+    weight: 0.0
+    kwargs:
+      knots: 17
+      num_proj: 1024
+  # 1.0, not brain_mets.yaml's calibrated 0.15 -- that value balanced recon
+  # against pred_loss in a JOINT objective. Here recon is the only trainable
+  # term, so there is nothing to balance and down-weighting would just shrink
+  # the effective learning rate.
+  recon:
+    weight: 1.0

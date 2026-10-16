@@ -1,0 +1,118 @@
+# Stage 2 (pairs): train ONLY the predictor, against a FIXED target space.
+#
+# Why this config exists alongside brain_mets_predictor.yaml (2026-08-26):
+# job 3096280 trained encoder + projector + predictor jointly with nothing
+# frozen, and train.py did not detach the target. pred_loss therefore had a
+# gradient path into `tgt_emb = projector(CLS_t1)` as well as into the
+# prediction, so the loss could fall by making the *target* blander rather
+# than by predicting better. The result: the epoch-70 predictor is 5.4% WORSE
+# than the trivial "copy t0 forward" baseline on held-out patients
+# (ratio 1.054, n=1024, 113 patients).
+#
+# This stage closes that loop. Freezing encoder + projector makes `emb` a
+# fixed, honest regression target, so the only way to reduce pred_loss is to
+# actually predict better.
+#
+# Pairs (not the all-history sequence dataset) on purpose: this matches the
+# data the decoder was trained on and every existing baseline number, so the
+# result is directly comparable and lewm_brain_mets_decoder composes with it
+# unchanged. The sequence run is a separate follow-up.
+defaults:
+  - _self_
+  - launcher: local
+  - data: brain_mets_clean  # t0/t1 pairs, fully-blank slices dropped
+  - model: lewm
+
+# NOTE: job 3175109 (blank-filtered) overwrote job 3172332 (unfiltered) because both
+# used this same name -- SaveCkptCallback writes to checkpoints/<output_model_name>/
+# and does not namespace by job id. Bump this name when changing anything that makes
+# checkpoints non-comparable, or the previous run's weights are lost.
+output_model_name: lewm_brain_mets_predictor_pairs_clean
+subdir: ${hydra:job.id}
+ckpt_id: null
+
+# Encoder AND projector frozen -- the projector is the load-bearing half.
+# `emb = projector(CLS)`, so a trainable projector means the target moves every
+# step (this is the same latent bug that invalidated the first decoder stage). Trainable here: predictor, pred_proj,
+# action_encoder (~11.7M params).
+#
+# NOTE: config/train/brain_mets_predictor.yaml sets no freeze_parts at all, so
+# it defaults to encoder-only and leaves the projector random + trainable --
+# it would reproduce exactly the bug this config fixes. Do not run that one.
+freeze_encoder_ckpt: ${oc.env:STABLEWM_HOME}/checkpoints/lewm_brain_mets/weights_epoch_70.pt
+freeze_parts: [encoder, projector]
+
+num_workers: 6
+train_split: 0.9
+seed: 3072
+img_size: 224
+embed_dim: 192
+history_size: 1  # t0 context only; also matches the decoder's num_frames: 1
+                 # so this checkpoint chains into lewm_brain_mets_decoder
+                 # under load_frozen_parts' strict=True.
+
+trainer:
+  max_epochs: 100   # sized near the realistic run length, NOT as an
+                    # EarlyStopping ceiling -- LinearWarmupCosineAnnealingLR
+                    # derives its anneal length from this value, so inflating
+                    # it leaves the LR barely annealed (this is what got job
+                    # 3135142 cancelled).
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+
+# Stop on the number that actually matters: pred_loss relative to the trivial
+# copy-t0 baseline. Monitoring raw pred_loss cannot distinguish "predicting
+# well" from "the targets happen to be easy in this split".
+early_stopping:
+  enabled: true
+  monitor: validate/pred_loss_vs_baseline_epoch
+  mode: min
+  patience: 20
+
+loader:
+  batch_size: 128
+  num_workers: ${num_workers}
+  persistent_workers: True
+  prefetch_factor: 3
+  pin_memory: True
+
+optimizer:
+  type: AdamW
+  lr: 5e-5
+  weight_decay: 1e-3
+
+num_preds: 1
+
+loss:
+  # Stop-gradient on the target branch. Redundant while encoder+projector are
+  # frozen (there is no gradient path to cut), but set explicitly so the
+  # objective is correct on its own terms rather than by accident of freezing.
+  detach_target: true
+
+  sigreg:
+    # Zero on purpose. SIGReg regularizes the distribution of `emb`, which is
+    # fully frozen in this stage -- it has no gradient and is pure compute
+    # (1024 random projections per step).
+    #
+    # It also un-dominates the objective: at weight 0.09 in job 3096280,
+    # validation loss was 0.09 x 3.60 = 0.32 SIGReg against 0.065 pred_loss,
+    # i.e. ~83% of the objective was a term the predictor cannot influence
+    # here. The Stage-2 smoke run (job 3127985) showed pred_loss RISING every
+    # epoch while total loss fell on the SIGReg term alone.
+    #
+    # Collapse is not a risk with pred_loss alone: a constant prediction
+    # scores worse than the identity map under pred_loss itself.
+    weight: 0.0
+    kwargs:
+      knots: 17
+      num_proj: 1024
+  # No recon: block, so lejepa_forward's `recon_cfg is not None` gate is closed
+  # and the decoder is never called. Note it IS still instantiated (model/lewm.yaml
+  # defines it, and Hydra's _self_-first ordering means this file cannot null it
+  # out without inverting precedence for every other key), so it shows up as
+  # 3.4M "trainable" params in the Lightning summary. It receives no gradient and
+  # AdamW skips it -- verified by scripts/diagnostics/verify_predictor_stage.py
+  # check [3], which asserts on actual gradient flow rather than requires_grad.
+  # Stage 3 trains it separately.

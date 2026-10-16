@@ -1,0 +1,15 @@
+# Stage 2 + residual prediction. Identical to brain_mets_predictor_pairs.yaml
+# except predict() returns `emb + f(emb, act_emb)` (model: lewm_residual).
+#
+# Inherits the whole Stage-2 setup rather than duplicating it, so the ONLY
+# difference from the run it is compared against is the residual connection --
+# one variable at a time.
+#
+# Comparison point (job 3175109, same config without residual): clean-pair ratio
+# 1.0143 [1.0047, 1.0244], beats baseline on 41.0% of pairs.
+defaults:
+  - brain_mets_predictor_pairs
+  - override model: lewm_residual
+  - _self_
+
+output_model_name: lewm_brain_mets_predictor_residual

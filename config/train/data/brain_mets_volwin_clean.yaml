@@ -1,0 +1,27 @@
+# The MATCHED CONTROL for data/brain_mets_consecutive.yaml: same volume_window
+# normalization, same blank filtering, `pairing: first_two`.
+#
+# This config exists because the obvious comparison is invalid. The recorded
+# residual numbers (0.9689 pairs, 0.9429 sequences) came from configs composing
+# data/brain_mets_clean.yaml, which reads the per-slice MIN-MAX cache, and were
+# measured with the retired 3-d action. Comparing a consecutive run against them
+# would move three variables at once -- pairing, normalization, and the covariate.
+#
+# Run this beside the consecutive arm so pairing is the only difference.
+dataset:
+  _target_: brain_mets.brain_mets_pair_dataset.BrainMetsPairDataset
+  root_dir: ${oc.env:BRAINJEPA_REGISTERED}
+  clinical_excel: ${hydra:runtime.cwd}/Yale-Brain-Mets-Longitudinal_ClinicalData_20250605.xlsx
+  img_size: ${img_size}
+  pairing: first_two
+
+  # The 10.9 GB PAIR cache, which covers exactly the visits this mode reads.
+  # The 41.9 GB all-visits cache would also serve every key correctly (same
+  # normalization, same key format) but costs 4x the memory for nothing here.
+  cache_path: ${hydra:runtime.cwd}/cache/brain_mets_slice_cache_volwin.pt
+  normalization: volume_window
+  drop_blank_slices: true
+
+  keys_to_load:
+    - pixels
+    - action

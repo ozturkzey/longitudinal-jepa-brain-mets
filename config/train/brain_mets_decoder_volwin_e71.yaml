@@ -1,0 +1,119 @@
+# Decoder for the RETRAINED encoder (job 4194822, epoch 70 = weights_epoch_71.pt),
+# 2026-09-17. Identical to brain_mets_decoder_e70_matched.yaml, which produced the
+# report's JEPA decoder results, except for the frozen checkpoint. The caveat that
+# config carries no longer applies: this encoder was trained on the volume_window
+# data it is evaluated on.
+defaults:
+  - launcher: local
+  - data: brain_mets_volwin   # NOT the minmax cache it trained on -- see the caveat above
+  - model: lewm
+  - _self_
+
+model:
+  decoder:
+    # decoder_dim defaults to 256 in stable_pretraining. Every arm before
+    # 2026-08-31 silently used that, which is why the older runs of this same
+    # config are not comparable to the radiodino arms. 768 + 12 heads is what
+    # brain_mets_decoder_radiodino768/192 use, so the decoder is identical
+    # across all four arms and only the embedding differs.
+    decoder_kwargs:
+      decoder_dim: 768
+      num_heads: 12
+
+output_model_name: lewm_brain_mets_decoder_volwin_e71
+subdir: ${hydra:job.id}
+ckpt_id: null
+
+# Everything except the decoder is frozen at job 3096280's epoch-70 weights.
+# Freezing the projector is what makes this stage valid at all: `emb` is
+# projector(CLS), so a trainable projector would move the very target space
+# the decoder is learning to invert. Freezing predictor/pred_proj/
+# action_encoder too makes the prediction path identical to the one the
+# decoder will be paired with at inference, and leaves the decoder as the
+# only thing receiving gradients.
+freeze_encoder_ckpt: ${oc.env:STABLEWM_HOME}/checkpoints/lewm_brain_mets_encoder_volwin/weights_epoch_71.pt
+# action_encoder is NOT loaded from the checkpoint: job 3096280 trained it on
+# the 3-d action [dt, age, sex], and `sex` was dropped on 2026-08-27, so it no
+# longer fits a 2-d model and load_frozen_parts raises (verified 2026-08-31 --
+# the other four parts load fine). It is frozen at fresh init instead, which
+# makes any pred_loss meaningless, hence loss.pred.weight: 0.0 below. None of
+# this touches recon_loss, which is the only thing this arm measures.
+freeze_parts: [encoder, projector, predictor, pred_proj]
+freeze_untrained_parts: [action_encoder]
+
+data:
+  dataset:
+    # ~17.6% of slices are blank volume edges. Any embedding reconstructs a
+    # black rectangle perfectly, so keeping them flatters the reported L1.
+    # The radiodino arms drop them; these must too or the populations differ.
+    drop_blank_slices: true
+
+# ---------------------------------------------------------------------------
+# MATCHED to brain_mets_decoder_radiodino768/192 (2026-08-31) so the four arms
+# form one scale. Everything below is the same treatment those two got; without
+# it the numbers are not comparable and the earlier 256-wide runs are not.
+# ---------------------------------------------------------------------------
+ckpt_every: 5
+
+num_workers: 6
+train_split: 0.9
+seed: 3072
+img_size: 224
+embed_dim: 192
+history_size: 1  # t0 context only (strict t0 -> t1 pair)
+
+trainer:
+  max_epochs: 250
+  devices: auto
+  accelerator: gpu
+  precision: bf16
+  gradient_clip_val: 1.0
+
+# recon_loss is the only term with a gradient this stage, so monitor it
+# directly rather than the combined loss (pred_loss/sigreg_loss are frozen
+# constants here -- still logged, useful as a sanity check that they don't
+# move).
+early_stopping:
+  enabled: true
+  monitor: validate/recon_loss_epoch
+  mode: min
+  patience: 30
+  # train.py ignored min_delta until 2026-08-31; it is forwarded now. Without
+  # it a flat curve resets the counter on a 1e-7 improvement and early stopping
+  # can never fire.
+  min_delta: 1.0e-4
+
+loader:
+  batch_size: 128
+  num_workers: ${num_workers}
+  persistent_workers: True
+  prefetch_factor: 3
+  pin_memory: True
+
+optimizer:
+  type: AdamW
+  lr: 5e-5
+  weight_decay: 1e-3
+
+num_preds: 1  # predict t1
+
+loss:
+  # Weight 0: emb is fully frozen here, so sigreg has no gradient and its
+  # only effect would be wasted compute on a 1024-projection statistic.
+  sigreg:
+    weight: 0.0
+    kwargs:
+      knots: 17
+      num_proj: 1024
+  # Weight 1.0, not brain_mets.yaml's calibrated 0.15 -- that value balanced
+  # recon against pred_loss/sigreg in a JOINT objective. Here recon is the
+  # sole trainable objective, so there is nothing to balance against and
+  # down-weighting would only shrink the effective learning rate.
+  # 0.0: this arm's action_encoder is random (see freeze_parts above), so a
+  # logged pred_loss would be noise. Everything on that path is frozen either
+  # way, so recon -- the only trainable objective -- is identical, and the
+  # comparison with the other three arms is unaffected.
+  pred:
+    weight: 0.0
+  recon:
+    weight: 1.0

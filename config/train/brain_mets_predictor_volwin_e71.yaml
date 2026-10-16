@@ -1,0 +1,15 @@
+# Stage 2 (predictor on a frozen encoder) for the RETRAINED encoder, 2026-09-17.
+#
+# Identical to brain_mets_predictor_residual_volwin.yaml, which produced the
+# report's first-two JEPA results, except for the frozen encoder: epoch 70 of the
+# volume_window retraining (job 4194822, saved as weights_epoch_71.pt) instead of
+# job 3096280's epoch 70. Epoch 70 was chosen because the validation prediction
+# error of that run is at its minimum between epochs 50 and 75, and because it is
+# the same point in training as the encoder it replaces.
+defaults:
+  - brain_mets_predictor_residual
+  - override data: brain_mets_volwin_clean
+  - _self_
+
+output_model_name: lewm_brain_mets_predictor_volwin_e71
+freeze_encoder_ckpt: ${oc.env:STABLEWM_HOME}/checkpoints/lewm_brain_mets_encoder_volwin/weights_epoch_71.pt

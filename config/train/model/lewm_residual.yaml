@@ -1,0 +1,21 @@
+# Same JEPA as model/lewm.yaml, with residual_predict: true -- predict() returns
+# `emb + f(emb, act_emb)` instead of `f(emb, act_emb)`.
+#
+# Separate config rather than a flag on lewm.yaml because Hydra's _self_-first
+# defaults ordering means a top-level config cannot override a key inside a
+# defaults-group config without inverting precedence for every other key. Same
+# pattern as data/brain_mets_clean.yaml.
+#
+# Why (2026-08-26): the "copy t0 forward" baseline is unbeaten. Stage-2 got clean
+# pairs to 1.0143 [1.0047, 1.0244] -- still losing. Absolute prediction forces the
+# network to reconstruct the 192-d input before modelling any change, and that
+# reconstruction error is roughly the losing margin. Residual makes the identity
+# map exact and free at init.
+#
+# Everything else is identical to model/lewm.yaml -- keep the two in sync if the
+# architecture changes.
+defaults:
+  - lewm
+  - _self_
+
+residual_predict: true

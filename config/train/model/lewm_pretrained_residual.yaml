@@ -1,0 +1,8 @@
+# model/lewm_pretrained.yaml (Radio-DINO) with residual_predict: true, so the
+# pretrained arms use the same residual predictor as the JEPA arm
+# (model/lewm_residual.yaml). Separate file for the same Hydra ordering reason.
+defaults:
+  - lewm_pretrained
+  - _self_
+
+residual_predict: true

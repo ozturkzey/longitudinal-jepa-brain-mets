@@ -1,0 +1,86 @@
+# Setup B, MRI-CORE arm. Identical to model/lewm_pretrained.yaml except the
+# encoder. NOTE two asymmetries vs the RadioDINO arm, both forced by the
+# checkpoint: MRI-CORE has no CLS token (index 0 is the patch mean) and it was
+# trained at 1024x1024, so its position embedding is interpolated down to the
+# 14x14 grid. RadioDINO is native 224 with a real CLS.
+#
+# Setup B: a FROZEN pretrained 2D radiology encoder in place of the
+# from-scratch ViT-tiny, with the projector doing the dimension reduction --
+#
+#     t0 -> pretrained encoder (768) -> MLP projector -> 192 -> predictor
+#
+# which is exactly what JEPA.encode() already does (`emb = projector(CLS)`);
+# only the widths change. Both branches share this one projector, so t0 and t1
+# land in the same 192-d space -- required for pred_loss and for the copy-t0
+# baseline to mean anything.
+#
+# Landing at 192 is the point: it removes the bottleneck-width confound that
+# made the earlier RadioDINO-768 vs LeWM-192 comparison uninterpretable.
+_target_: lewm_core.jepa.JEPA
+
+# Twin encoders, both FROZEN. The clone is a deepcopy of the encoder, so both
+# branches are the same fixed function -- t1's embedding is produced by the
+# clone, not by the same module instance that saw t0. Mathematically the output
+# matches a single shared frozen encoder; the structure is kept so Setup A and
+# Setup B differ ONLY in whether the encoders train.
+clone_target_encoder: true
+num_preds: ${num_preds}
+
+encoder:
+  _target_: brain_mets.pretrained_encoders.MRICoreEncoder
+  img_size: ${img_size}
+  # Frozen inside the class, not via freeze_encoder_ckpt -- that helper only
+  # loads from our own checkpoints. See pretrained_encoders.py's docstring.
+
+# The only part that differs structurally from model/lewm.yaml: 768 in, 192 out.
+projector:
+  _target_: lewm_core.module.MLP
+  input_dim: ${encoder_dim}
+  output_dim: ${embed_dim}
+  hidden_dim: 2048
+  norm_fn:
+    _target_: torch.nn.BatchNorm1d
+    _partial_: true
+
+# Everything below is byte-identical to model/lewm.yaml: the predictor only
+# ever sees 192-d, whichever encoder produced it.
+predictor:
+  _target_: lewm_core.module.ARPredictor
+  num_frames: ${history_size}
+  input_dim: ${embed_dim}
+  hidden_dim: ${embed_dim}
+  output_dim: ${embed_dim}
+  depth: 6
+  heads: 16
+  mlp_dim: 2048
+  dim_head: 64
+  dropout: 0.1
+  emb_dropout: 0.0
+
+action_encoder:
+  _target_: lewm_core.module.Embedder
+  input_dim: ???
+  emb_dim: ${embed_dim}
+
+pred_proj:
+  _target_: lewm_core.module.MLP
+  input_dim: ${embed_dim}
+  output_dim: ${embed_dim}
+  hidden_dim: 2048
+  norm_fn:
+    _target_: torch.nn.BatchNorm1d
+    _partial_: true
+
+# Instantiated but never called: this config configures no recon loss, so the
+# decoder stage (config/train/brain_mets_decoder.yaml) is where it is trained.
+# patch_size 16 and embed_dim 768 match the RadioDINO grid, not ViT-tiny's.
+# embed_dim is the POOLED width (192), NOT the encoder's 768. JEPA.decode_prediction
+# broadcasts the pooled `emb` -- projector output -- across the patch grid, so that is
+# what the decoder receives. Using ${encoder_dim} here would only work for decode(),
+# which takes the raw patch tokens and is not the path this project uses.
+decoder:
+  _target_: stable_pretraining.backbone.decoders.build_image_decoder
+  embed_dim: ${embed_dim}
+  image_shape: [3, "${img_size}", "${img_size}"]
+  kind: vit
+  patch_size: 16
